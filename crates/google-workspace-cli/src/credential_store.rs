@@ -161,8 +161,10 @@ impl KeyringBackend {
         let raw = std::env::var("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND").unwrap_or_default();
         let lower = raw.to_lowercase();
         match lower.as_str() {
-            "file" => KeyringBackend::File,
-            "keyring" | "" => KeyringBackend::Keyring,
+            // Local build: default to the file backend so no caller can
+            // switch keys by forgetting to set this variable.
+            "file" | "" => KeyringBackend::File,
+            "keyring" => KeyringBackend::Keyring,
             other => {
                 // Item 1: warn on unrecognized values
                 eprintln!(
@@ -797,9 +799,9 @@ mod tests {
     // ---- KeyringBackend::from_env tests ----
 
     #[test]
-    fn backend_default_is_keyring() {
-        // from_env reads the env; default (empty/unset) → Keyring
-        assert_eq!(KeyringBackend::from_env(), KeyringBackend::Keyring);
+    fn backend_default_is_file() {
+        // Local build: default (empty/unset) → File
+        assert_eq!(KeyringBackend::from_env(), KeyringBackend::File);
     }
 
     // ---- read_key_file tests ----
