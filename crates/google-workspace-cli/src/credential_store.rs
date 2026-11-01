@@ -210,28 +210,26 @@ fn resolve_key(
                         if decoded.len() == 32 {
                             let mut arr = [0u8; 32];
                             arr.copy_from_slice(&decoded);
-                            // Cleanup insecure file fallback if it still exists.
-                            // TOCTOU race condition is a known limitation.
-                            if let Err(e) = std::fs::remove_file(key_file) {
-                                if e.kind() != std::io::ErrorKind::NotFound {
-                                    eprintln!(
-                                        "Warning: failed to remove legacy key file at '{}': {}",
-                                        key_file.display(),
-                                        e
-                                    );
-                                }
-                            }
+                            // Keep `.encryption_key`: credentials saved with the
+                            // file backend can only be decrypted with that key.
                             return Ok(arr);
                         }
                     }
                     // Keyring contained invalid data — fall through to generate new.
                 }
                 Err(keyring::Error::NoEntry) => {
-                    // Keyring is empty — fall through to generate new.
+                    // Keyring is empty — use the file key if there is one.
                 }
                 Err(e) => {
                     anyhow::bail!("OS keyring failed: {}. Set GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file to use file storage.", sanitize_for_terminal(&e.to_string()));
                 }
+            }
+
+            // An existing `.encryption_key` still decrypts credentials saved
+            // with it, so reuse it instead of generating a key that cannot.
+            if let Some(key) = read_key_file(key_file) {
+                let _ = provider.set_password(&STANDARD.encode(key));
+                return Ok(key);
             }
 
             // Generate a new key if keyring was empty or contained invalid data.
@@ -242,15 +240,6 @@ fn resolve_key(
                     "Failed to set key in OS keyring: {}",
                     sanitize_for_terminal(&e.to_string())
                 );
-            }
-            if let Err(e) = std::fs::remove_file(key_file) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    eprintln!(
-                        "Warning: failed to remove legacy key file at '{}': {}",
-                        key_file.display(),
-                        e
-                    );
-                }
             }
             return Ok(key);
         }
@@ -581,7 +570,7 @@ mod tests {
 
     #[test]
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    fn keyring_backend_cleans_up_legacy_file_on_success() {
+    fn keyring_backend_keeps_key_file_on_success() {
         use base64::{engine::general_purpose::STANDARD, Engine as _};
         let dir = tempfile::tempdir().unwrap();
         let key_file = dir.path().join(".encryption_key");
@@ -598,29 +587,27 @@ mod tests {
 
         assert_eq!(result, expected);
         assert!(
-            !key_file.exists(),
-            "Legacy file must be deleted upon successful keyring read"
+            key_file.exists(),
+            "The key file must survive a successful keyring read"
         );
     }
 
     #[test]
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    fn keyring_backend_cleans_up_legacy_file_on_generation() {
+    fn keyring_backend_reuses_key_file_when_keyring_is_empty() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
         let dir = tempfile::tempdir().unwrap();
         let key_file = dir.path().join(".encryption_key");
 
-        std::fs::write(&key_file, "legacy-data").unwrap();
-        assert!(key_file.exists());
+        let expected = [42u8; 32];
+        std::fs::write(&key_file, STANDARD.encode(expected)).unwrap();
 
         let mock = MockKeyring::no_entry();
 
         let result = resolve_key(KeyringBackend::Keyring, &mock, &key_file).unwrap();
 
-        assert_eq!(result.len(), 32);
-        assert!(
-            !key_file.exists(),
-            "Legacy file must be deleted upon successful keyring generation"
-        );
+        assert_eq!(result, expected, "An existing file key must be reused");
+        assert!(key_file.exists(), "The key file must not be deleted");
     }
 
     #[test]
